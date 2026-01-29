@@ -1,0 +1,8 @@
+*pycache*
+*.py[cod]
+VADv2/
+test/
+config/
+data/
+docs/
+projects/configs/VAD

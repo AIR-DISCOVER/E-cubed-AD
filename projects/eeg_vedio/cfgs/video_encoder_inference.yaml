@@ -1,0 +1,8 @@
+project_dir: "/home/tsinghuaair/zhengxj/projects/cognitive-driving-world-model/contrastive-eeg-video-finetuning"
+
+video_encoder:
+  ckpt_load_path: "ckpts/first_try/video_encoder_ft_1.safetensors"
+  # ckpt_load_path: None
+  # ckpt_save_path: "ckpts/video_encoder_ft_1.safetensors"
+  mlp_layers: [200, 200]
+  dropout: 0

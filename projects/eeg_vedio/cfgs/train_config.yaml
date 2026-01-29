@@ -1,0 +1,29 @@
+data:
+  eeg_dir: "/home/tsinghuaair/zhengxj/projects/cognitive-driving-world-model/datasets/real_car/processed_duration_0.2_video_fps_10/eeg"
+  video_dir: "/home/tsinghuaair/zhengxj/projects/cognitive-driving-world-model/datasets/real_car/processed_duration_0.2_video_fps_10/video"
+  clip_info_path: "/home/tsinghuaair/zhengxj/projects/cognitive-driving-world-model/datasets/real_car/processed_duration_0.2_video_fps_10/clip_info.json"
+
+  data_duration: 0.2
+
+
+version_identifier: "duration_0.2_fps_10"
+
+model:
+  epochs: 30
+  batch_size: 16
+  learning_rate: 1e-4
+  temperature: 0.1
+  fine_tuning_policy: "missing_trainable" # "all_trainable" or "missing_trainable"
+  project_dir: "/home/tsinghuaair/zhengxj/projects/cognitive-driving-world-model/contrastive-eeg-video-finetuning"
+
+  eeg_encoder:
+    load_fine_tuned_ckpt: False
+    ckpt_load_path: "ckpts/eeg_encoder_base.pth"
+    ckpt_save_path: "ckpts/duration_0.2_fps_10/eeg_encoder_ft_1.safetensors"
+
+  video_encoder:
+    ckpt_load_path: "ckpts/video_encoder_base.safetensors"
+    # ckpt_load_path: None
+    ckpt_save_path: "ckpts/duration_0.2_fps_10/video_encoder_ft_1.safetensors"
+    mlp_layers: [512, 200]
+
