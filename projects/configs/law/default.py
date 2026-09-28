@@ -80,7 +80,7 @@ model = dict(
     )
 
 dataset_type = 'VADCustomNuScenesDataset'
-data_root = 'data/nuscenes/'
+data_root = './data/nuscenes/'
 file_client_args = dict(backend='disk')
 
 train_pipeline = [
@@ -198,7 +198,7 @@ lr_config = dict(
 evaluation = dict(interval=total_epochs, pipeline=test_pipeline, metric='bbox', map_metric='chamfer')
 
 runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
-
+load_from = 'LAW.pth'
 log_config = dict(
     interval=20,
     hooks=[

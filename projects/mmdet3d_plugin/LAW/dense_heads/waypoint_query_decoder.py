@@ -61,6 +61,8 @@ class WaypointHead(BaseModule):
         # query feature
         self.num_views = num_views
         self.num_proposals = num_proposals
+        self.eeg_layers = 4
+        self.eeg_dim = 200
         self.view_query_feat = nn.Parameter(torch.randn(1, self.num_views, hidden_channel, self.num_proposals))
         self.waypoint_query_feat = nn.Parameter(torch.randn(1, self.num_proposals, hidden_channel))
 
@@ -87,6 +89,19 @@ class WaypointHead(BaseModule):
             )
         self.wp_attn = nn.TransformerDecoder(wp_decoder_layer, 1) # input: Bz, num_token, d_model
 
+        # eeg_attn
+        self.eeg_mlp = nn.Linear(self.eeg_dim, hidden_channel)
+        eeg_decoder_layer = nn.TransformerDecoderLayer(
+                d_model=hidden_channel,
+                nhead=num_heads//2,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                batch_first=True,
+            )
+        self.eeg_attn = nn.TransformerDecoder(eeg_decoder_layer, self.eeg_layers)
+        self.brain_key_pos = torch.nn.Parameter(torch.randn(1, 1, self.eeg_dim))
+        self.brain_query_pos = torch.nn.Parameter(torch.randn(1, 1, hidden_channel))
+
         # world model
         wm_decoder_layer = nn.TransformerDecoderLayer(
             d_model=hidden_channel,
@@ -112,11 +127,11 @@ class WaypointHead(BaseModule):
         # head
         self.num_traj_modal = num_traj_modal
         self.waypoint_head = nn.Sequential(
-                nn.Linear(hidden_channel, hidden_channel),
+                nn.Linear(hidden_channel*2, hidden_channel*2),
                 nn.ReLU(inplace=True),
-                nn.Linear(hidden_channel, hidden_channel),
+                nn.Linear(hidden_channel*2, hidden_channel*2),
                 nn.ReLU(inplace=True),
-                nn.Linear(hidden_channel, self.num_traj_modal* 2)
+                nn.Linear(hidden_channel*2, self.num_traj_modal* 2)
             )
 
         # position embedding
@@ -191,7 +206,7 @@ class WaypointHead(BaseModule):
         coords_position_embeding = self.position_encoder(pos_embed)
         return coords_position_embeding
     
-    def forward(self, img_feat, img_metas, ego_info=None, is_test=False):
+    def forward(self, brain_feats, img_feat, img_metas, ego_info=None, is_test=False):
         # init
         losses = {}
         Bz, num_views, num_channels, height, width = img_feat.shape
@@ -215,7 +230,13 @@ class WaypointHead(BaseModule):
 
         # predict wp
         updated_waypoint_query_feat = self.wp_attn(init_waypoint_query_feat, spatial_view_feat) #final_view_feat.shape torch.Size([1, 1440, 256])
-        cur_waypoint = self.waypoint_head(updated_waypoint_query_feat)
+        eeg_query = updated_waypoint_query_feat + self.brain_query_pos
+        brain_feats = brain_feats + self.brain_key_pos
+        eeg_key = self.eeg_mlp(brain_feats)
+        eeg_query = self.eeg_attn(eeg_query, eeg_key)
+        concat_query = torch.cat([updated_waypoint_query_feat, eeg_query],dim=-1)
+
+        cur_waypoint = self.waypoint_head(concat_query)
 
         if self.num_traj_modal > 1:
             assert self.num_traj_modal == 3

@@ -139,3 +139,12 @@ tools/CLIP
 *.tar
 *.pth
 work_dirs/
+
+# Local datasets, checkpoints, and generated outputs
+/data/
+/work_dirs/
+*.safetensors
+/projects/eeg_vedio/logs/
+/projects/eeg_vedio/data/
+/projects/eeg_vedio/tensorboard/
+tmp_gpu*/

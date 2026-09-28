@@ -3,6 +3,8 @@ import copy
 import numpy as np
 import torch, cv2, os, random
 import torch.nn as nn
+import yaml
+from pathlib import Path
 from mmdet.models import DETECTORS
 from mmdet3d.core import bbox3d2result
 from mmcv.runner import force_fp32, auto_fp16
@@ -17,6 +19,44 @@ from mmdet3d.models import builder
 from projects.mmdet3d_plugin.LAW.utils import prj_pts_to_img, draw_lidar_pts, denormalize_img
 import matplotlib.pyplot as plt
 from ipdb import set_trace
+#brain_like
+from projects.eeg_vedio.src.models.video_encoder.video_encoder import VideoEncoder
+from torchvision import transforms
+from vision15.models.video.swin_transformer import swin3d_b, Swin3D_B_Weights
+
+class ImageQueue:
+    def __init__(self, max_length=4):
+        self.max_length = max_length
+        self.queue = []
+
+    def add_image(self, image_tensor):
+        self.queue.append(image_tensor)
+        if len(self.queue) > self.max_length:
+            self.queue.pop(0)
+
+    def get_queue_tensor(self):
+        # filled_queue = torch.zeros((self.max_length, 3, 736, 1280), dtype=torch.float32)
+        filled_queue = torch.zeros((self.max_length, 3, 384, 640), dtype=torch.float32)
+
+        for i in range(len(self.queue)):
+            filled_queue[i] = self.queue[i]
+
+        return filled_queue.unsqueeze(0).to('cuda')
+
+    def get_copy_queue_tensor(self):
+        # filled_queue = torch.zeros((self.max_length, 3, 736, 1280), dtype=torch.float32)
+        filled_queue = torch.zeros((self.max_length, 3, 384, 640), dtype=torch.float32)
+
+        for i in range(len(self.queue)):
+            filled_queue[i, :, :, :] = self.queue[i]
+
+        for i in range(len(self.queue), self.max_length):
+            filled_queue[i, :, :, :] = self.queue[0]
+
+        return filled_queue.unsqueeze(0).to('cuda')
+
+    def clear_queue(self):
+        self.queue.clear()
 
 @DETECTORS.register_module()
 class LAW(VAD):
@@ -55,11 +95,23 @@ class LAW(VAD):
 
         if (not self.with_img_neck) and self.use_swin:
             self.swin_img_mlp = nn.Linear(swin_input_channel, hidden_channel)
-        
+
         self.metrics_history = []
         self.call_count = 0
         self.wm_loss_weight = wm_loss_weight
-        
+
+        repo_root = Path(__file__).resolve().parents[3]
+        project_dir = repo_root / "projects" / "eeg_vedio"
+        config_path = project_dir / "cfgs" / "video_encoder_inference.yaml"
+        with config_path.open("r", encoding="utf-8") as config_file:
+            config = yaml.safe_load(config_file)
+        config = config["video_encoder"]
+        self.cognitive_video_encoder = VideoEncoder(config, str(project_dir))
+        self.cognitive_video_encoder.load_ckpts()
+        for param in self.cognitive_video_encoder.parameters():
+            param.requires_grad = False
+        self.imgqueue = ImageQueue()
+
 
     def extract_img_feat(self, img, img_metas, len_queue=None):
         """Extract features of images."""
@@ -87,7 +139,7 @@ class LAW(VAD):
                 img_feats = list(img_feats.values())
         else:
             return None
-        
+
         if not isinstance(img_feats, tuple):
             img_feats = [img_feats.squeeze(2)]
 
@@ -104,7 +156,7 @@ class LAW(VAD):
             else:
                 img_feats_reshaped.append(img_feat.view(B, int(BN / B), C, H, W))
         return img_feats_reshaped
-    
+
     @auto_fp16(apply_to=('img'), out_fp32=True)
     def extract_feat(self, img, img_metas=None, len_queue=None):
         """Extract features from images and points."""
@@ -112,7 +164,24 @@ class LAW(VAD):
         img_feats = self.extract_img_feat(img, img_metas, len_queue=len_queue)
         return img_feats
 
-    def obtain_history_feat(self, imgs_queue, img_metas_list, is_test=False):
+    #提取脑电视觉区信号
+    @auto_fp16(apply_to=('img'), out_fp32=True)
+    def extract_brain_visual_feat(self,img):
+        B = img.size(0)
+        if img is not None:
+
+            # input_shape = img.shape[-2:]
+            # # update real input shape of each single img
+            # for img_meta in img_metas:
+            #     img_meta.update(input_shape=input_shape)
+            B, N, C, H, W = img.size()
+        else:
+            return None
+        video_embeddings = self.cognitive_video_encoder(img)
+        device = video_embeddings.device
+        return video_embeddings.unsqueeze(0)
+
+    def obtain_history_feat(self, brain_feats, imgs_queue, img_metas_list, is_test=False):
         """Obtain history BEV features iteratively.
         """
         bs, len_queue, num_cams, C, H, W = imgs_queue.shape
@@ -122,8 +191,8 @@ class LAW(VAD):
         for i in range(len_queue):
             img_metas = [each[i] for each in img_metas_list]
             img_feats = [each_scale[:, i] for each_scale in img_feats_list][0]
-            pred_ego_fut_trajs, cur_img_feat, pred_img_feat = self.pts_bbox_head(img_feats, img_metas)
-            
+            pred_ego_fut_trajs, cur_img_feat, pred_img_feat = self.pts_bbox_head(brain_feats, img_feats, img_metas)
+
             # compute loss
             if not is_test:
                 # loss waypoint
@@ -169,22 +238,23 @@ class LAW(VAD):
         """
         if self.only_front_view:
             img = img[:, :, 0:1, ...]
-
         len_queue = img.size(1)
+        front_img = img[:,:,0,...]
         prev_img = img[:, :-1, ...]
         prev_img_metas = copy.deepcopy(img_metas)
-
+        brain_feats = self.extract_brain_visual_feat(front_img)
         self.pts_bbox_head.prev_view_feat = None
         if len_queue > 1:
-            prev_frame_losses, pred_img_feat = self.obtain_history_feat(prev_img, prev_img_metas)  
+            prev_frame_losses, pred_img_feat = self.obtain_history_feat(brain_feats, prev_img, prev_img_metas)
         else:
             prev_frame_losses = {}
 
         cur_img = img[:, -1, ...]
         cur_img_metas = [each[len_queue-1] for each in img_metas]
 
-        cur_img_feats = self.extract_feat(img=cur_img, img_metas=cur_img_metas)[0]            
-        losses = self.forward_pts_train(cur_img_feats, 
+        cur_img_feats = self.extract_feat(img=cur_img, img_metas=cur_img_metas)[0]
+        losses = self.forward_pts_train(brain_feats,
+                                        cur_img_feats,
                                         cur_img_metas,
                                         pred_img_feat=pred_img_feat,
                                         ego_his_trajs=ego_his_trajs, ego_fut_trajs=ego_fut_trajs,
@@ -195,6 +265,7 @@ class LAW(VAD):
         return losses
 
     def forward_pts_train(self,
+                          brain_feats,
                           img_feats,
                           img_metas,
                           pred_img_feat=None,
@@ -211,20 +282,20 @@ class LAW(VAD):
             ego_lcf_feat: (vx, vy, ax, ay, w, length, width, vel, steer), w: yaw角速度
 
         """
-        #get the ego info   
+        #get the ego info
         losses = {}
         B = ego_his_trajs.size(0)
         ego_his_trajs = ego_his_trajs.reshape(B, -1)
         ego_lcf_feat = ego_lcf_feat.reshape(B, -1)
         ego_fut_cmd = ego_fut_cmd.reshape(B, -1)
         ego_info = torch.cat([ego_his_trajs, ego_lcf_feat, ego_fut_cmd], dim=1)
-        
+
         prev_pred_img_feat = pred_img_feat
-        preds_ego_future_traj, cur_img_feat, pred_img_feat = self.pts_bbox_head(img_feats, img_metas, ego_info)
-        
+        preds_ego_future_traj, cur_img_feat, pred_img_feat = self.pts_bbox_head(brain_feats, img_feats, img_metas, ego_info)
+
         # world model loss
         loss_rec = self.pts_bbox_head.loss_reconstruction(
-                                prev_pred_img_feat, 
+                                prev_pred_img_feat,
                                 cur_img_feat.detach(),
                                 )
         losses['loss_rec'] = loss_rec * self.wm_loss_weight
@@ -266,7 +337,7 @@ class LAW(VAD):
         )
 
         return bbox_results
-    
+
     def simple_test(
         self,
         img_metas,
@@ -281,20 +352,25 @@ class LAW(VAD):
         gt_attr_labels=None,
         **kwargs,
     ):
+
         len_queue = img.size(1)
         prev_img = img[:, :-1, ...]
         prev_img_metas = copy.deepcopy(img_metas)
         self.pts_bbox_head.prev_view_feat = None
-        if len_queue > 1:
-            _ = self.obtain_history_feat(prev_img, prev_img_metas, is_test=True)  
+        # if len_queue > 1:
+        #     _ = self.obtain_history_feat(prev_img, prev_img_metas, is_test=True)
 
         cur_img = img[:, -1, ...]
+        front_img=cur_img[0,0,:,:,:]
+        self.imgqueue.add_image(front_img)
         cur_img_metas = [each[len_queue-1] for each in img_metas]
 
-        cur_img_feats = self.extract_feat(img=cur_img, img_metas=cur_img_metas)[0]  
+        cur_img_feats = self.extract_feat(img=cur_img, img_metas=cur_img_metas)[0]
+        brain_feats=self.extract_brain_visual_feat(self.imgqueue.get_queue_tensor())
 
         bbox_list = [dict() for i in range(len(img_metas))]
         metric_dict = self.simple_test_pts(
+            brain_feats,
             cur_img_feats,
             cur_img_metas,
             gt_bboxes_3d,
@@ -306,14 +382,15 @@ class LAW(VAD):
             ego_lcf_feat=ego_lcf_feat,
             gt_attr_labels=gt_attr_labels,
         )
-        
+
         for result_dict in bbox_list:
             result_dict['metric_results'] = metric_dict
 
         return bbox_list
-    
+
     def simple_test_pts(
         self,
+        brain_feats,
         img_feats,
         img_metas,
         gt_bboxes_3d,
@@ -333,8 +410,9 @@ class LAW(VAD):
         ego_info = torch.cat([ego_his_trajs_, ego_lcf_feat_, ego_fut_cmd_], dim=1)
 
         preds_ego_future_traj, _, _ = self.pts_bbox_head(
-                                        img_feats, 
-                                        img_metas, 
+                                        brain_feats,
+                                        img_feats,
+                                        img_metas,
                                     )
 
         with torch.no_grad():
@@ -349,7 +427,7 @@ class LAW(VAD):
             ego_fut_preds = preds_ego_future_traj[0]
             ego_fut_trajs = ego_fut_trajs[0, 0]
             ego_fut_cmd = ego_fut_cmd[0, 0, 0]
-            
+
             ego_fut_preds = ego_fut_preds.cumsum(dim=-2)
             ego_fut_trajs = ego_fut_trajs.cumsum(dim=-2)
 
@@ -371,7 +449,7 @@ class LAW(VAD):
                 self.compute_and_print_metrics_average()
 
         return metric_dict_planner_stp3
-    
+
     def compute_and_print_metrics_average(self):
         # compute avg
         avg_metrics = {key: sum(m[key] for m in self.metrics_history) / len(self.metrics_history) for key in self.metrics_history[0]}
