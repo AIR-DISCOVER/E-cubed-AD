@@ -44,3 +44,9 @@ dist/
 *.swp
 *.swo
 *~
+
+# Local experiment patches retained outside the GitHub branch
+/cognitive_cross_attn_strict.patch
+/cognitive_cross_attn_after_self_attn_full.patch
+/cognitive_cross_attn_after_self_attn_incremental_from_strict.patch
+/cognitive_cross_attn_after_self_attn_motion_only_incremental_from_strict.patch
