@@ -1,0 +1,46 @@
+# Python and local build artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+build/
+dist/
+*.so
+
+# Local datasets and generated NuScenes metadata
+/data/nuscenes
+/data/infos/
+
+# Model checkpoints; upload weights through the separate artifact workflow
+/ckpt/
+/ckpts/
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.bin
+*.onnx
+*.engine
+
+# Training outputs and local experiment snapshots
+/work_dirs/
+/logs/
+*.log
+*.log.*
+/backups/
+/backup*/
+/.dist_test/
+
+# Local scratch files
+/check_cog_gate_m2.tar.gz
+/ls
+.DS_Store
+
+# Local saved copies of config/source files
+*.bak*
+
+# Editor temporary files
+*.swp
+*.swo
+*~

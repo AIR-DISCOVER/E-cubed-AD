@@ -1,0 +1,7 @@
+
+video_encoder:
+  ckpt_load_path: "ckpts/Driving_thinking_model.safetensors"
+  # ckpt_load_path: None
+  # ckpt_save_path: "ckpts/video_encoder_ft_1.safetensors"
+  mlp_layers: [200, 200]
+  dropout: 0

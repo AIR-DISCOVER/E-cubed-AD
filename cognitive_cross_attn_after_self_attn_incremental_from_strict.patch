@@ -1,0 +1,306 @@
+diff --git a/projects/configs/diffusiondrive_configs/diffusiondrive_small_stage2.py b/projects/configs/diffusiondrive_configs/diffusiondrive_small_stage2.py
+index ef38701..cd7487b 100644
+--- a/projects/configs/diffusiondrive_configs/diffusiondrive_small_stage2.py
++++ b/projects/configs/diffusiondrive_configs/diffusiondrive_small_stage2.py
+@@ -410,7 +410,7 @@ model = dict(
+             cog_dim=200,
+             cog_gate_init=-4.0,
+             cog_num_tokens=4,
+-            cog_fusion_stage='diffusion_cross_attn',
++            cog_fusion_stage='diffusion_cross_attn_after_self_attn',
+             cog_fusion_type='gated_residual',
+             cog_debug=False,
+ 
+diff --git a/projects/configs/diffusiondrive_configs/diffusiondrive_small_stage2_train.py b/projects/configs/diffusiondrive_configs/diffusiondrive_small_stage2_train.py
+index dc56de0..19763ac 100644
+--- a/projects/configs/diffusiondrive_configs/diffusiondrive_small_stage2_train.py
++++ b/projects/configs/diffusiondrive_configs/diffusiondrive_small_stage2_train.py
+@@ -407,7 +407,7 @@ model = dict(
+             cog_dim=200,
+             cog_gate_init=-4.0,
+             cog_num_tokens=4,
+-            cog_fusion_stage='diffusion_cross_attn',
++            cog_fusion_stage='diffusion_cross_attn_after_self_attn',
+             cog_fusion_type='gated_residual',
+             cog_debug=False,
+             fut_ts=fut_ts,
+diff --git a/projects/mmdet3d_plugin/models/motion/motion_planning_head_v13.py b/projects/mmdet3d_plugin/models/motion/motion_planning_head_v13.py
+index 9b34fa6..9f9c956 100644
+--- a/projects/mmdet3d_plugin/models/motion/motion_planning_head_v13.py
++++ b/projects/mmdet3d_plugin/models/motion/motion_planning_head_v13.py
+@@ -304,6 +304,7 @@ class V13MotionPlanningHead(BaseModule):
+             'pre_command_plan_query',
+             'diffusion_adaln',
+             'diffusion_cross_attn',
++            'diffusion_cross_attn_after_self_attn',
+             'post_command_plan_query',
+             'pre_agent_traj_query',
+             'both',
+@@ -321,10 +322,15 @@ class V13MotionPlanningHead(BaseModule):
+                 "to disable cognitive enhancement."
+             )
+ 
+-        if self.cog_fusion_stage == 'diffusion_cross_attn':
++        cognitive_cross_attn_stages = [
++            'diffusion_cross_attn',
++            'diffusion_cross_attn_after_self_attn',
++        ]
++
++        if self.cog_fusion_stage in cognitive_cross_attn_stages:
+             if not isinstance(self.cog_num_tokens, int) or self.cog_num_tokens <= 0:
+                 raise ValueError(
+-                    "diffusion_cross_attn requires cog_num_tokens to be a positive int, "
++                    f"{self.cog_fusion_stage} requires cog_num_tokens to be a positive int, "
+                     f"got {self.cog_num_tokens}"
+                 )
+ 
+@@ -363,10 +369,10 @@ class V13MotionPlanningHead(BaseModule):
+             self.cog_adaln_adapter = None
+             self.cog_adaln_gate = None
+ 
+-        if self.use_cognitive_plan_query and self.cog_fusion_stage == 'diffusion_cross_attn':
++        if self.use_cognitive_plan_query and self.cog_fusion_stage in cognitive_cross_attn_stages:
+             if cognitive_cross_graph_model is None:
+                 raise ValueError(
+-                    "diffusion_cross_attn requires cognitive_cross_graph_model"
++                    f"{self.cog_fusion_stage} requires cognitive_cross_graph_model"
+                 )
+             self.cog_cross_adapter = nn.Sequential(
+                 nn.Linear(self.cog_dim, self.embed_dims),
+@@ -380,13 +386,17 @@ class V13MotionPlanningHead(BaseModule):
+                     nn.init.zeros_(m.bias)
+ 
+             self.cog_cross_gate = nn.Parameter(torch.tensor(float(self.cog_gate_init)))
++            cog_cross_insert_op = {
++                'diffusion_cross_attn': 'anchor_cross_gnn',
++                'diffusion_cross_attn_after_self_attn': 'self_attn',
++            }[self.cog_fusion_stage]
+             num_cog_cross_layers = sum(
+-                1 for op in self.diff_operation_order if op == "anchor_cross_gnn"
++                1 for op in self.diff_operation_order if op == cog_cross_insert_op
+             )
+             if num_cog_cross_layers <= 0:
+                 raise ValueError(
+-                    "diffusion_cross_attn must be inserted before anchor_cross_gnn, "
+-                    "but diff_operation_order has no anchor_cross_gnn."
++                    f"{self.cog_fusion_stage} must be inserted at {cog_cross_insert_op}, "
++                    f"but diff_operation_order has no {cog_cross_insert_op}."
+                 )
+             self.cog_cross_attn_layers = nn.ModuleList(
+                 [
+@@ -397,7 +407,8 @@ class V13MotionPlanningHead(BaseModule):
+             self.cog_cross_norm_layers = nn.ModuleList(
+                 [
+                     build(norm_layer, NORM_LAYERS)
+-                    if norm_layer is not None else nn.Identity()
++                    if self.cog_fusion_stage == 'diffusion_cross_attn' and norm_layer is not None
++                    else nn.Identity()
+                     for _ in range(num_cog_cross_layers)
+                 ]
+             )
+@@ -749,7 +760,10 @@ class V13MotionPlanningHead(BaseModule):
+             debug_gate = self.cog_gate
+             if self.cog_fusion_stage == 'diffusion_adaln':
+                 debug_gate = self.cog_adaln_gate
+-            elif self.cog_fusion_stage == 'diffusion_cross_attn':
++            elif self.cog_fusion_stage in [
++                'diffusion_cross_attn',
++                'diffusion_cross_attn_after_self_attn',
++            ]:
+                 debug_gate = self.cog_cross_gate
+             print(
+                 "[CogDebug] video_cog_feature:",
+@@ -856,12 +870,18 @@ class V13MotionPlanningHead(BaseModule):
+ 
+ 
+     def _get_cognitive_cross_tokens(self, cog_feature, dtype):
+-        if not self.use_cognitive_plan_query or self.cog_fusion_stage != 'diffusion_cross_attn':
++        if (
++            not self.use_cognitive_plan_query
++            or self.cog_fusion_stage not in [
++                'diffusion_cross_attn',
++                'diffusion_cross_attn_after_self_attn',
++            ]
++        ):
+             return None
+ 
+         if cog_feature is None:
+             raise RuntimeError(
+-                "cog_fusion_stage='diffusion_cross_attn' requires video_cog_feature, "
++                f"cog_fusion_stage='{self.cog_fusion_stage}' requires video_cog_feature, "
+                 "but cog_feature is None."
+             )
+ 
+@@ -877,28 +897,35 @@ class V13MotionPlanningHead(BaseModule):
+ 
+ 
+     def _fuse_cognitive_diffusion_cross_attn(self, traj_feature, cog_feature, cog_layer_index):
+-        if not self.use_cognitive_plan_query or self.cog_fusion_stage != 'diffusion_cross_attn':
++        if (
++            not self.use_cognitive_plan_query
++            or self.cog_fusion_stage not in [
++                'diffusion_cross_attn',
++                'diffusion_cross_attn_after_self_attn',
++            ]
++        ):
+             return traj_feature
+ 
+         if self.cog_fusion_type != 'gated_residual':
+             raise ValueError(f'Invalid cog_fusion_type={self.cog_fusion_type}')
+         if traj_feature.dim() != 3:
+             raise ValueError(
+-                "diffusion_cross_attn expects traj_feature [B, M, C], "
++                f"{self.cog_fusion_stage} expects traj_feature [B, M, C], "
+                 f"got {tuple(traj_feature.shape)}"
+             )
+         if traj_feature.shape[-1] != self.embed_dims:
+             raise ValueError(
+-                "diffusion_cross_attn traj_feature channel mismatch: "
++                f"{self.cog_fusion_stage} traj_feature channel mismatch: "
+                 f"got {tuple(traj_feature.shape)}, expected C={self.embed_dims}"
+             )
+         if self.cog_cross_attn_layers is None:
+             raise RuntimeError(
+-                "cog_fusion_stage='diffusion_cross_attn' requires initialized cog_cross_attn_layers."
++                f"cog_fusion_stage='{self.cog_fusion_stage}' requires initialized "
++                "cog_cross_attn_layers."
+             )
+         if cog_layer_index < 0 or cog_layer_index >= len(self.cog_cross_attn_layers):
+             raise IndexError(
+-                "diffusion_cross_attn layer index out of range: "
++                f"{self.cog_fusion_stage} layer index out of range: "
+                 f"index={cog_layer_index}, num_layers={len(self.cog_cross_attn_layers)}"
+             )
+ 
+@@ -908,12 +935,12 @@ class V13MotionPlanningHead(BaseModule):
+         )
+         if cog_tokens.shape[0] != traj_feature.shape[0]:
+             raise ValueError(
+-                "diffusion_cross_attn batch mismatch: "
++                f"{self.cog_fusion_stage} batch mismatch: "
+                 f"traj_feature={tuple(traj_feature.shape)}, cog_tokens={tuple(cog_tokens.shape)}"
+             )
+         if cog_tokens.shape[-1] != traj_feature.shape[-1]:
+             raise ValueError(
+-                "diffusion_cross_attn channel mismatch: "
++                f"{self.cog_fusion_stage} channel mismatch: "
+                 f"traj_feature={tuple(traj_feature.shape)}, cog_tokens={tuple(cog_tokens.shape)}"
+             )
+         cog_out = self.cog_cross_attn_layers[cog_layer_index](
+@@ -926,7 +953,7 @@ class V13MotionPlanningHead(BaseModule):
+ 
+         if self.cog_debug and not hasattr(self, "_debug_cog_cross_attn_printed"):
+             print(
+-                "[CogFusionDebug][diffusion_cross_attn]",
++                f"[CogFusionDebug][{self.cog_fusion_stage}]",
+                 "layer_index:",
+                 cog_layer_index,
+                 "traj_feature:",
+@@ -945,14 +972,20 @@ class V13MotionPlanningHead(BaseModule):
+ 
+ 
+     def _check_cognitive_cross_layer_count(self, used_layers):
+-        if not self.use_cognitive_plan_query or self.cog_fusion_stage != 'diffusion_cross_attn':
++        if (
++            not self.use_cognitive_plan_query
++            or self.cog_fusion_stage not in [
++                'diffusion_cross_attn',
++                'diffusion_cross_attn_after_self_attn',
++            ]
++        ):
+             return
+         expected_layers = len(self.cog_cross_attn_layers)
+         if used_layers != expected_layers:
+             raise RuntimeError(
+-                "diffusion_cross_attn layer count mismatch: "
++                f"{self.cog_fusion_stage} layer count mismatch: "
+                 f"used {used_layers}, expected {expected_layers}. "
+-                "Check diff_operation_order and anchor_cross_gnn placement."
++                "Check diff_operation_order and cognitive cross-attn placement."
+             )
+ 
+ 
+@@ -1228,6 +1261,13 @@ class V13MotionPlanningHead(BaseModule):
+                     traj_feature,
+                     traj_feature,
+                 )
++                if self.cog_fusion_stage == 'diffusion_cross_attn_after_self_attn':
++                    traj_feature = self._fuse_cognitive_diffusion_cross_attn(
++                        traj_feature=traj_feature,
++                        cog_feature=cog_feature,
++                        cog_layer_index=cog_cross_layer_index,
++                    )
++                    cog_cross_layer_index += 1
+             elif op == "modulation":
+                 # import ipdb;ipdb.set_trace()
+                 traj_feature = self.diff_layers[i](
+@@ -1255,18 +1295,21 @@ class V13MotionPlanningHead(BaseModule):
+                     key_pos=map_anchor_embed_selected,
+                 )
+             elif op == "anchor_cross_gnn":
+-                traj_feature = self._fuse_cognitive_diffusion_cross_attn(
+-                    traj_feature=traj_feature,
+-                    cog_feature=cog_feature,
+-                    cog_layer_index=cog_cross_layer_index,
+-                )
+-                cog_cross_layer_index += 1
++                if self.cog_fusion_stage == 'diffusion_cross_attn':
++                    traj_feature = self._fuse_cognitive_diffusion_cross_attn(
++                        traj_feature=traj_feature,
++                        cog_feature=cog_feature,
++                        cog_layer_index=cog_cross_layer_index,
++                    )
++                    cog_cross_layer_index += 1
+                 traj_feature = self.diff_layers[i](
+                     traj_feature,
+                     key=cmd_plan_nav_query,
+                     value=cmd_plan_nav_query,
+                 )
+             elif op == "norm" or op == "ffn":
++                if op == "norm" and self.cog_fusion_stage == 'diffusion_cross_attn_after_self_attn':
++                    continue
+                 traj_feature = self.diff_layers[i](traj_feature)
+             elif op == "diff_refine":
+                 # import ipdb;ipdb.set_trace()
+@@ -1549,6 +1592,13 @@ class V13MotionPlanningHead(BaseModule):
+                         traj_feature,
+                         traj_feature,
+                     )
++                    if self.cog_fusion_stage == 'diffusion_cross_attn_after_self_attn':
++                        traj_feature = self._fuse_cognitive_diffusion_cross_attn(
++                            traj_feature=traj_feature,
++                            cog_feature=cog_feature,
++                            cog_layer_index=cog_cross_layer_index,
++                        )
++                        cog_cross_layer_index += 1
+                 elif op == "modulation":
+                     
+                     traj_feature = self.diff_layers[i](
+@@ -1574,18 +1624,21 @@ class V13MotionPlanningHead(BaseModule):
+                         key_pos=map_anchor_embed_selected,
+                     )
+                 elif op == "anchor_cross_gnn":
+-                    traj_feature = self._fuse_cognitive_diffusion_cross_attn(
+-                        traj_feature=traj_feature,
+-                        cog_feature=cog_feature,
+-                        cog_layer_index=cog_cross_layer_index,
+-                    )
+-                    cog_cross_layer_index += 1
++                    if self.cog_fusion_stage == 'diffusion_cross_attn':
++                        traj_feature = self._fuse_cognitive_diffusion_cross_attn(
++                            traj_feature=traj_feature,
++                            cog_feature=cog_feature,
++                            cog_layer_index=cog_cross_layer_index,
++                        )
++                        cog_cross_layer_index += 1
+                     traj_feature = self.diff_layers[i](
+                         traj_feature,
+                         key=cmd_plan_nav_query,
+                         value=cmd_plan_nav_query,
+                     )
+                 elif op == "norm" or op == "ffn":
++                    if op == "norm" and self.cog_fusion_stage == 'diffusion_cross_attn_after_self_attn':
++                        continue
+                     traj_feature = self.diff_layers[i](traj_feature)
+                 elif op == "diff_refine":
+                     # import ipdb;ipdb.set_trace()
