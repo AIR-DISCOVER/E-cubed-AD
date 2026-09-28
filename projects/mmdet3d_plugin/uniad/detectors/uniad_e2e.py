@@ -12,6 +12,51 @@ import os
 from ..dense_heads.seg_head_plugin import IOU
 from .uniad_track import UniADTrack
 from mmdet.models.builder import build_head
+#driving_thinking model
+from projects.eeg_vedio.src.models.video_encoder.video_encoder import VideoEncoder
+from torchvision import transforms
+import yaml
+
+class ImageQueue:
+    def __init__(self, max_length=3):
+        self.max_length = max_length
+        self.queue = []  # 初始化一个空队列
+
+    def add_image(self, image_tensor):
+        # 添加新图像到队列
+        self.queue.append(image_tensor)
+
+        # 如果队列长度超过最大长度，则移除最旧的图像
+        if len(self.queue) > self.max_length:
+            self.queue.pop(0)
+
+    def get_queue_tensor(self):
+        # 创建零填充的张量
+        filled_queue = torch.zeros((self.max_length, 3, 928, 1600), dtype=torch.float32)
+
+        # 将当前队列的图像复制到填充的张量中
+        for i in range(len(self.queue)):
+            filled_queue[i] = self.queue[i]
+
+        return filled_queue.unsqueeze(0).to('cuda')
+
+    def get_copy_queue_tensor(self):
+        # 创建零填充的张量
+        filled_queue = torch.zeros((self.max_length, 3, 928, 1600), dtype=torch.float32)
+
+        # 将当前队列的图像复制到填充的张量中
+        for i in range(len(self.queue)):
+            filled_queue[i, :, :, :] = self.queue[i]
+
+        # 复制已有图像以满足新填充逻辑
+        for i in range(len(self.queue), self.max_length):
+            filled_queue[i, :, :, :] = self.queue[0]
+
+        return filled_queue.unsqueeze(0).to('cuda')
+
+    def clear_queue(self):
+        # 清空队列
+        self.queue.clear()
 
 @DETECTORS.register_module()
 class UniAD(UniADTrack):
@@ -46,6 +91,29 @@ class UniAD(UniADTrack):
         self.task_loss_weight = task_loss_weight
         assert set(task_loss_weight.keys()) == \
                {'track', 'occ', 'motion', 'map', 'planning'}
+
+        config_path = "projects/eeg_vedio/cfgs/video_encoder_inference.yaml"
+        project_dir="projects/eeg_vedio"
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        config = config['video_encoder']
+        config["ckpt_load_path"] = "ckpts/Driving_thinking_model.safetensors"
+        self.cognitive_video_encoder = VideoEncoder(config, project_dir)
+        self.cognitive_video_encoder.load_ckpts()
+        for param in self.cognitive_video_encoder.parameters():
+            param.requires_grad = False
+        self.imgqueue = ImageQueue()
+
+    @auto_fp16(apply_to=('img'), out_fp32=True)
+    def extract_brain_visual_feat(self,img):
+        B = img.size(0)
+        if img is not None:
+            B, N, C, H, W = img.size()
+        else:
+            return None
+        video_embeddings = self.cognitive_video_encoder(img)
+        #device = video_embeddings.device
+        return video_embeddings.unsqueeze(0)
 
     @property
     def with_planning_head(self):
@@ -158,7 +226,8 @@ class UniAD(UniADTrack):
         """
         losses = dict()
         len_queue = img.size(1)
-        
+        front_img = img[:,:,0,...]
+        brain_feats = self.extract_brain_visual_feat(front_img)
 
         losses_track, outs_track = self.forward_track_train(img, gt_bboxes_3d, gt_labels_3d, gt_past_traj, gt_past_traj_mask, gt_inds, gt_sdc_bbox, gt_sdc_label,
                                                         l2g_t, l2g_r_mat, img_metas, timestamp)
@@ -218,7 +287,7 @@ class UniAD(UniADTrack):
 
         # Forward Plan Head
         if self.with_planning_head:
-            outs_planning = self.planning_head.forward_train(bev_embed, outs_motion, sdc_planning, sdc_planning_mask, command, gt_future_boxes)
+            outs_planning = self.planning_head.forward_train(brain_feats, bev_embed, outs_motion, sdc_planning, sdc_planning_mask, command, gt_future_boxes)
             losses_planning = outs_planning['losses']
             losses_planning = self.loss_weighted_and_prefixed(losses_planning, prefix='planning')
             losses.update(losses_planning)
@@ -285,6 +354,9 @@ class UniAD(UniADTrack):
         self.prev_frame_info['prev_angle'] = tmp_angle
 
         img = img[0]
+        front_img=img[0,0,:,:,:]
+        self.imgqueue.add_image(front_img)
+        brain_feats=self.extract_brain_visual_feat(self.imgqueue.get_queue_tensor())
         img_metas = img_metas[0]
         timestamp = timestamp[0] if timestamp is not None else None
 
@@ -323,7 +395,7 @@ class UniAD(UniADTrack):
                 sdc_planning_mask=sdc_planning_mask,
                 command=command
             )
-            result_planning = self.planning_head.forward_test(bev_embed, outs_motion, outs_occ, command)
+            result_planning = self.planning_head.forward_test(brain_feats, bev_embed, outs_motion, outs_occ, command)
             result[0]['planning'] = dict(
                 planning_gt=planning_gt,
                 result_planning=result_planning,

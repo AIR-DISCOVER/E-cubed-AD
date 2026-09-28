@@ -416,7 +416,7 @@ model = dict(
         group_id_list=group_id_list,
         num_anchor=6,
         use_nonlinear_optimizer=use_nonlinear_optimizer,
-        anchor_info_path='data/others/motion_anchor_infos_mode6.pkl',
+        anchor_info_path='data/others/motion_anchor_infos_mode6_v2.pkl',
         transformerlayers=dict(
             type='MotionTransformerDecoder',
             pc_range=point_cloud_range,
@@ -596,7 +596,7 @@ test_pipeline = [
 ]
 data = dict(
     samples_per_gpu=1,
-    workers_per_gpu=8,
+    workers_per_gpu=16,
     train=dict(
         type=dataset_type,
         file_client_args=file_client_args,
@@ -699,7 +699,7 @@ log_config = dict(
     interval=10, hooks=[dict(type="TextLoggerHook"), dict(type="TensorboardLoggerHook")]
 )
 checkpoint_config = dict(interval=1)
-load_from = "ckpts/uniad_base_track_map.pth"
+load_from = "ckpts/uniad_base_e2e_v2.pth"
 
 find_unused_parameters = True
 logger_name = 'mmdet'

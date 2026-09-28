@@ -21,6 +21,15 @@ from tools.analysis_tools.visualize.render.bev_render import BEVRender
 from tools.analysis_tools.visualize.render.cam_render import CameraRender
 
 
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+
+
+def _resolve_repo_path(path):
+    if path is None or os.path.isabs(path):
+        return path
+    return os.path.join(REPO_ROOT, path)
+
+
 class Visualizer:
     """
     BaseRender class
@@ -28,7 +37,7 @@ class Visualizer:
 
     def __init__(
             self,
-            dataroot='/mnt/petrelfs/yangjiazhi/e2e_proj/data/nus_mini',
+            dataroot='data/nuscenes',
             version='v1.0-mini',
             predroot=None,
             with_occ_map=False,
@@ -43,6 +52,10 @@ class Visualizer:
             show_sdc_car=False,
             show_sdc_traj=False,
             show_legend=False):
+        if predroot is None:
+            raise ValueError("predroot must point to a prediction result file")
+        dataroot = _resolve_repo_path(dataroot)
+        predroot = _resolve_repo_path(predroot)
         self.nusc = NuScenes(version=version, dataroot=dataroot, verbose=True)
         self.predict_helper = PredictHelper(self.nusc)
         self.with_occ_map = with_occ_map
@@ -282,6 +295,7 @@ class Visualizer:
         out.release()
 
 def main(args):
+    out_folder = _resolve_repo_path(args.out_folder)
     render_cfg = dict(
         with_occ_map=False,
         with_map=False,
@@ -299,8 +313,8 @@ def main(args):
 
     viser = Visualizer(version='v1.0-mini', predroot=args.predroot, dataroot='data/nuscenes', **render_cfg)
 
-    if not os.path.exists(args.out_folder):
-        os.makedirs(args.out_folder)
+    if not os.path.exists(out_folder):
+        os.makedirs(out_folder)
 
     val_splits = splits.val
 
@@ -319,19 +333,19 @@ def main(args):
             print(i, sample_token, 'not in prediction pkl!')
             continue
 
-        viser.visualize_bev(sample_token, os.path.join(args.out_folder, str(i).zfill(3)))
+        viser.visualize_bev(sample_token, os.path.join(out_folder, str(i).zfill(3)))
 
         if args.project_to_cam:
-            viser.visualize_cam(sample_token, os.path.join(args.out_folder, str(i).zfill(3)))
-            viser.combine(os.path.join(args.out_folder, str(i).zfill(3)))
+            viser.visualize_cam(sample_token, os.path.join(out_folder, str(i).zfill(3)))
+            viser.combine(os.path.join(out_folder, str(i).zfill(3)))
 
-    viser.to_video(args.out_folder, args.demo_video, fps=4, downsample=2)
+    viser.to_video(out_folder, args.demo_video, fps=4, downsample=2)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--predroot', default='/mnt/nas20/yihan01.hu/tmp/results.pkl', help='Path to results.pkl')
-    parser.add_argument('--out_folder', default='/mnt/nas20/yihan01.hu/tmp/viz/demo_test/', help='Output folder path')
+    parser.add_argument('--predroot', required=True, help='Path to results.pkl (relative to the repository root or absolute)')
+    parser.add_argument('--out_folder', default='viz/demo_test/', help='Output directory (relative to the repository root or absolute)')
     parser.add_argument('--demo_video', default='mini_val_final.avi', help='Demo video name')
     parser.add_argument('--project_to_cam', default=True, help='Project to cam (default: True)')
     args = parser.parse_args()

@@ -61,7 +61,7 @@ class NuScenesMap:
     We use the same WGS 84 Web Mercator (EPSG:3857) projection as Google Maps/Earth.
     """
     def __init__(self,
-                 dataroot: str = '/data/sets/nuscenes',
+                 dataroot: str = 'data/nuscenes',
                  map_name: str = 'singapore-onenorth'):
         """
         Loads the layers, create reverse indices and shortcuts, initializes the explorer class.

@@ -156,3 +156,16 @@ mmcv
 
 # vscode config file
 .vscode/
+
+# Local datasets, checkpoints, and generated outputs
+/data/
+*.pth
+*.pt
+*.pkl
+*.safetensors
+*.ckpt
+*.onnx
+*.npz
+**/logs/
+**/tensorboard/
+viz/

@@ -50,25 +50,36 @@ class PlanningHeadSingleMode(nn.Module):
         self.bev_w = bev_w
         self.navi_embed = nn.Embedding(3, embed_dims)
         self.reg_branch = nn.Sequential(
-            nn.Linear(embed_dims, embed_dims),
+            nn.Linear(embed_dims*2, embed_dims),
             nn.ReLU(),
             nn.Linear(embed_dims, planning_steps * 2),
         )
         self.loss_planning = build_loss(loss_planning)
         self.planning_steps = planning_steps
         self.planning_eval = planning_eval
-        
+        self.eeg_dropout = 0.05
+        self.eeg_layers = 4
+        self.eeg_heads = 8
+        self.eeg_dim = 200
+
         #### planning head
         fuser_dim = 3
         attn_module_layer = nn.TransformerDecoderLayer(embed_dims, 8, dim_feedforward=embed_dims*2, dropout=0.1, batch_first=False)
         self.attn_module = nn.TransformerDecoder(attn_module_layer, 3)
-        
+
+        self.eeg_mlp = torch.nn.Linear(self.eeg_dim, 256)
+        eeg_attn_module_layer = nn.TransformerDecoderLayer(embed_dims, self.eeg_heads, dim_feedforward=embed_dims*2, dropout=self.eeg_dropout, batch_first=False)
+        self.eeg_attn = nn.TransformerDecoder(eeg_attn_module_layer, self.eeg_layers)
+
         self.mlp_fuser = nn.Sequential(
                 nn.Linear(embed_dims*fuser_dim, embed_dims),
                 nn.LayerNorm(embed_dims),
                 nn.ReLU(inplace=True),
             )
         
+        self.brain_key_pos = torch.nn.Parameter(torch.randn(1, 1, self.eeg_dim))
+        self.brain_query_pos = torch.nn.Parameter(torch.randn(1, 1, embed_dims))
+
         self.pos_embed = nn.Embedding(1, embed_dims)
         self.loss_collision = []
         for cfg in loss_collision:
@@ -93,6 +104,7 @@ class PlanningHeadSingleMode(nn.Module):
             self.bev_adapter = nn.Sequential(*bev_adapter)
            
     def forward_train(self,
+                      brain_feats,
                       bev_embed, 
                       outs_motion={}, 
                       sdc_planning=None, 
@@ -121,22 +133,23 @@ class PlanningHeadSingleMode(nn.Module):
 
         occ_mask = None
         
-        outs_planning = self(bev_embed, occ_mask, bev_pos, sdc_traj_query, sdc_track_query, command)
+        outs_planning = self(brain_feats, bev_embed, occ_mask, bev_pos, sdc_traj_query, sdc_track_query, command)
         loss_inputs = [sdc_planning, sdc_planning_mask, outs_planning, gt_future_boxes]
         losses = self.loss(*loss_inputs)
         ret_dict = dict(losses=losses, outs_motion=outs_planning)
         return ret_dict
 
-    def forward_test(self, bev_embed, outs_motion={}, outs_occflow={}, command=None):
+    def forward_test(self, brain_feats, bev_embed, outs_motion={}, outs_occflow={}, command=None):
         sdc_traj_query = outs_motion['sdc_traj_query']
         sdc_track_query = outs_motion['sdc_track_query']
         bev_pos = outs_motion['bev_pos']
         occ_mask = outs_occflow['seg_out']
         
-        outs_planning = self(bev_embed, occ_mask, bev_pos, sdc_traj_query, sdc_track_query, command)
+        outs_planning = self(brain_feats, bev_embed, occ_mask, bev_pos, sdc_traj_query, sdc_track_query, command)
         return outs_planning
 
     def forward(self, 
+                brain_feats,
                 bev_embed, 
                 occ_mask, 
                 bev_pos, 
@@ -186,8 +199,13 @@ class PlanningHeadSingleMode(nn.Module):
         # plan_query: [1, 1, 256]
         # bev_feat: [40000, 1, 256]
         plan_query = self.attn_module(plan_query, bev_feat)   # [1, 1, 256]
-        
-        sdc_traj_all = self.reg_branch(plan_query).view((-1, self.planning_steps, 2))
+        eeg_query = plan_query + self.brain_query_pos
+        brain_feats = brain_feats + self.brain_key_pos
+        eeg_key = self.eeg_mlp(brain_feats)
+        eeg_query = self.eeg_attn(eeg_query,eeg_key)#(1,1,256)
+        concat_query = torch.cat([plan_query,eeg_query],dim=-1)
+
+        sdc_traj_all = self.reg_branch(concat_query).view((-1, self.planning_steps, 2))
         sdc_traj_all[...,:2] = torch.cumsum(sdc_traj_all[...,:2], dim=1)
         sdc_traj_all[0] = bivariate_gaussian_activation(sdc_traj_all[0])
         if self.use_col_optim and not self.training:
